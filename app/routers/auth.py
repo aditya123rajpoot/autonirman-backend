@@ -3,21 +3,31 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from app.models import User
 from app.database import get_db
-from app.security import hash_password, verify_password, create_access_token
+from app.security import hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
+# -------------------------------
+# Schemas
+# -------------------------------
 class SignupRequest(BaseModel):
     name: str
     email: EmailStr
     password: str
 
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+# -------------------------------
+# Signup Route
+# -------------------------------
 @router.post("/signup")
 def signup(data: SignupRequest, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == data.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     new_user = User(
         name=data.name,
         email=data.email,
@@ -27,18 +37,15 @@ def signup(data: SignupRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_user)
 
-    token = create_access_token({"sub": new_user.email})
-    return {"access_token": token, "user": {"id": new_user.id, "name": new_user.name, "email": new_user.email}}
+    return {"message": "Signup successful"}
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
+# -------------------------------
+# Login Route
+# -------------------------------
 @router.post("/login")
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
     if not user or not verify_password(data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    token = create_access_token({"sub": user.email})
-    return {"access_token": token, "user": {"id": user.id, "name": user.name, "email": user.email}}
+    return {"message": "Login successful", "user": {"id": user.id, "name": user.name, "email": user.email}}
