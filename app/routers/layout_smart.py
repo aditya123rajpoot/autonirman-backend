@@ -12,20 +12,24 @@ from langchain_groq import ChatGroq
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from loguru import logger
-from prometheus_client import Histogram
+from prometheus_client import Histogram, Counter
 from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type
 )
-from groq.error import BadRequestError
+from groq import APIError  # ✅ Correct import
 
 # ---------------------
-# 📊 Prometheus Metric
+# 📊 Prometheus Metrics
 # ---------------------
 REQUEST_LATENCY = Histogram(
     "layout_smart_latency_seconds", "Latency for smart layout endpoint"
+)
+
+FALLBACK_USED = Counter(
+    "layout_fallback_count", "Number of times fallback (GPT-4) was used due to Groq failure"
 )
 
 router = APIRouter(
@@ -122,10 +126,17 @@ Be concise and user‎-friendly.
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, max=10),
-    retry=retry_if_exception_type((BadRequestError,))
+    retry=retry_if_exception_type((APIError,))
 )
 async def call_llm(chain: LLMChain, vars: dict) -> str:
-    return await chain.arun(vars)
+    try:
+        return await chain.arun(vars)
+    except APIError as e:
+        logger.warning("⚠️ Groq failed. Switching to OpenAI GPT-4. Reason: {}", str(e))
+        FALLBACK_USED.inc()
+        fallback_llm = ChatOpenAI(model="gpt-4", temperature=0.6)
+        fallback_chain = LLMChain(llm=fallback_llm, prompt=_PROMPT)
+        return await fallback_chain.arun(vars)
 
 # ---------------------
 # 🚀 Endpoint
