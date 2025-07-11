@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, validator
 from typing import Literal, Optional, List, Dict, Any, Union
 from langchain_core.messages import HumanMessage
-from langchain_community.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI  # ✅ Updated import
 from langchain_groq import ChatGroq
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
@@ -19,7 +19,7 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type
 )
-from groq import APIError  # ✅ Correct import
+# from groq.error import APIError, BadRequestError
 
 # ---------------------
 # 📊 Prometheus Metrics
@@ -100,8 +100,8 @@ PLUGINS: List[AdvisorPlugin] = [VastuAdvisor(), EcoAdvisor()]
 def get_llm():
     key = os.getenv("GROQ_API_KEY")
     if key:
-        logger.info("✅ Using Groq LLM: mixtral")
-        return ChatGroq(api_key=key, model_name="mixtral-8x7b-32768", temperature=0.6)
+        logger.info("✅ Using Groq LLM: llama3-70b-8192")
+        return ChatGroq(api_key=key, model_name="llama3-70b-8192", temperature=0.6)
     logger.warning("⚠️ Falling back to OpenAI GPT-4")
     return ChatOpenAI(model="gpt-4", temperature=0.6)
 
@@ -126,12 +126,12 @@ Be concise and user‎-friendly.
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, max=10),
-    retry=retry_if_exception_type((APIError,))
+    retry=retry_if_exception_type(Exception)
 )
 async def call_llm(chain: LLMChain, vars: dict) -> str:
     try:
         return await chain.arun(vars)
-    except APIError as e:
+    except Exception as e:
         logger.warning("⚠️ Groq failed. Switching to OpenAI GPT-4. Reason: {}", str(e))
         FALLBACK_USED.inc()
         fallback_llm = ChatOpenAI(model="gpt-4", temperature=0.6)
@@ -166,7 +166,7 @@ async def smart_layout(
 
     if cached:
         response_text = cached
-        logger.info("Cache hit")
+        logger.info("✅ Cache hit")
     else:
         variables = {
             "area": data.total_builtup_area,
@@ -187,7 +187,7 @@ async def smart_layout(
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM service unavailable")
 
         await redis_client.set(cache_key, response_text, ex=3600)
-        logger.info("Response cached")
+        logger.info("🧠 Response cached")
 
     try:
         parsed = json.loads(response_text)
@@ -199,7 +199,7 @@ async def smart_layout(
         sections.append(plugin.apply(data))
 
     duration = start()
-    logger.bind(duration=duration).info("Request complete")
+    logger.bind(duration=duration).info("✅ Request complete")
 
     return SmartLayoutResponse(
         session_id=data.session_id,
