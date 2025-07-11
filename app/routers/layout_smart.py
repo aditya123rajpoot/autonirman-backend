@@ -4,7 +4,6 @@ import redis.asyncio as redis
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field, validator
 from typing import Literal, Optional, List, Dict, Any, Union
 from langchain_core.messages import HumanMessage
@@ -14,12 +13,13 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from loguru import logger
 from prometheus_client import Histogram
-from tenacity import retry, stop_after_attempt, wait_exponential
-
-# ---------------------
-# 🔐 OAuth2 Dependency
-# ---------------------
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/token")
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type
+)
+from groq.error import BadRequestError
 
 # ---------------------
 # 📊 Prometheus Metric
@@ -34,7 +34,7 @@ router = APIRouter(
 )
 
 # ---------------------
-# 📥 Input Schema
+# 📅 Input Schema
 # ---------------------
 class SmartLayoutRequest(BaseModel):
     total_builtup_area: int = Field(..., gt=100, example=2400)
@@ -50,7 +50,7 @@ class SmartLayoutRequest(BaseModel):
         return v.strip().title()
 
 # ---------------------
-# 📤 Output Schema
+# 📄 Output Schema
 # ---------------------
 class Section(BaseModel):
     title: str
@@ -88,7 +88,6 @@ class EcoAdvisor(AdvisorPlugin):
             content=f"Green cover: {int(data.total_builtup_area * pct)} sq ft; rain harvesting at rear setback"
         )
 
-# Registered plugins
 PLUGINS: List[AdvisorPlugin] = [VastuAdvisor(), EcoAdvisor()]
 
 # ---------------------
@@ -97,16 +96,18 @@ PLUGINS: List[AdvisorPlugin] = [VastuAdvisor(), EcoAdvisor()]
 def get_llm():
     key = os.getenv("GROQ_API_KEY")
     if key:
+        logger.info("✅ Using Groq LLM: mixtral")
         return ChatGroq(api_key=key, model_name="mixtral-8x7b-32768", temperature=0.6)
+    logger.warning("⚠️ Falling back to OpenAI GPT-4")
     return ChatOpenAI(model="gpt-4", temperature=0.6)
 
 # ---------------------
-# 🤖 LLM Prompt & Chain
+# 🧠 LLM Prompt & Chain
 # ---------------------
 _PROMPT = PromptTemplate(
     input_variables=["area", "floors", "shape", "city", "weather", "vastu"],
     template="""
-You are a world‑class architect AI. Based on:
+You are a world‎-class architect AI. Based on:
 • Area: {area} sq ft
 • Floors: {floors}
 • Plot: {shape}
@@ -114,11 +115,15 @@ You are a world‑class architect AI. Based on:
 • Vastu: {vastu}
 
 Return JSON with sections: Layout Plan, Setbacks, Parking, Climate Adaptation. 
-Be concise and user‑friendly.
+Be concise and user‎-friendly.
 """
 )
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, max=10),
+    retry=retry_if_exception_type((BadRequestError,))
+)
 async def call_llm(chain: LLMChain, vars: dict) -> str:
     return await chain.arun(vars)
 
@@ -128,8 +133,7 @@ async def call_llm(chain: LLMChain, vars: dict) -> str:
 @router.post(
     "/smart",
     response_model=SmartLayoutResponse,
-    summary="Generate an AI-driven smart layout",
-    dependencies=[Depends(oauth2_scheme)]
+    summary="Generate an AI-driven smart layout"
 )
 async def smart_layout(
     request: Request,
@@ -139,17 +143,13 @@ async def smart_layout(
     start = REQUEST_LATENCY.time()
     logger.bind(endpoint="layout_smart", session=data.session_id).info("Request start")
 
-    # Redis
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     redis_client = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
 
     memory_key = f"layout_mem:{data.session_id}"
     history = await redis_client.lrange(memory_key, 0, -1) if data.session_id else []
 
-    # LLM chain
     chain = LLMChain(llm=llm, prompt=_PROMPT)
-
-    # Cache check
     cache_key = f"layout_cache:{json.dumps(data.dict(), sort_keys=True)}"
     cached = await redis_client.get(cache_key)
 
@@ -157,30 +157,33 @@ async def smart_layout(
         response_text = cached
         logger.info("Cache hit")
     else:
+        variables = {
+            "area": data.total_builtup_area,
+            "floors": data.number_of_floors,
+            "shape": data.shape_of_plot,
+            "city": data.your_city,
+            "weather": data.weather_in_your_city,
+            "vastu": data.do_you_follow_vastu
+        }
+
+        logger.info("📤 Sending to LLM: {}", variables)
+
         try:
-            response_text = await call_llm(chain, {
-                "area": data.total_builtup_area,
-                "floors": data.number_of_floors,
-                "shape": data.shape_of_plot,
-                "city": data.your_city,
-                "weather": data.weather_in_your_city,
-                "vastu": data.do_you_follow_vastu
-            })
+            response_text = await call_llm(chain, variables)
+            logger.info("✅ LLM raw response: {}", response_text)
         except Exception as e:
-            logger.error("LLM call failed: {}", e)
+            logger.error("❌ LLM call failed: {}", str(e))
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM service unavailable")
 
         await redis_client.set(cache_key, response_text, ex=3600)
         logger.info("Response cached")
 
-    # Parse LLM output
     try:
         parsed = json.loads(response_text)
         sections = [Section(**sec) for sec in parsed.get("sections", [])]
     except Exception:
         sections = [Section(title="Smart Layout", content=response_text)]
 
-    # Run plugins
     for plugin in PLUGINS:
         sections.append(plugin.apply(data))
 
