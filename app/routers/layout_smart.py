@@ -116,7 +116,7 @@ Be concise and user‎-friendly.
 # ---------------------
 def get_llm():
     key = os.getenv("GROQ_API_KEY")
-    if key and key.startswith("gsk_"):  # You may adjust prefix based on Groq key format
+    if key and key.startswith("gsk_"):
         logger.info("✅ Using Groq LLM: llama3-70b-8192")
         return ChatGroq(api_key=key, model_name="llama3-70b-8192", temperature=0.6)
     logger.warning("⚠️ GROQ_API_KEY not set or invalid. Using OpenAI GPT-4 instead.")
@@ -133,16 +133,15 @@ def get_llm():
 async def call_llm(chain: LLMChain, vars: dict) -> str:
     try:
         response = await chain.ainvoke(vars)
-        return response
+        return json.dumps(response)  # Always serialize to string before returning
     except Exception as e:
         logger.warning("⚠️ Groq failed. Switching to GPT-4. Reason: {}", str(e))
         FALLBACK_USED.inc()
-
         try:
             fallback_llm = ChatOpenAI(model="gpt-4", temperature=0.6)
             fallback_chain = LLMChain(llm=fallback_llm, prompt=_PROMPT)
             response = await fallback_chain.ainvoke(vars)
-            return response
+            return json.dumps(response)  # Ensure JSON string
         except Exception as fallback_error:
             logger.error("❌ Fallback GPT-4 failed: {}", str(fallback_error))
             raise HTTPException(
@@ -170,7 +169,10 @@ async def smart_layout(
         redis_client = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
 
         memory_key = f"layout_mem:{data.session_id}"
-        history = await redis_client.lrange(memory_key, 0, -1) if data.session_id else []
+        if data.session_id:
+            history = await redis_client.lrange(memory_key, 0, -1)
+        else:
+            history = []
 
         chain = LLMChain(llm=llm, prompt=_PROMPT)
         cache_key = f"layout_cache:{json.dumps(data.dict(), sort_keys=True)}"
@@ -193,7 +195,7 @@ async def smart_layout(
 
             try:
                 response_text = await call_llm(chain, variables)
-                logger.info("✅ LLM raw response: {}", repr(response_text))
+                logger.info("✅ LLM raw response: {}", response_text)
             except Exception as e:
                 logger.error("❌ LLM call failed: {}", str(e))
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM service unavailable")
