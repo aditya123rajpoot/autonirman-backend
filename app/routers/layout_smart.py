@@ -94,17 +94,6 @@ class EcoAdvisor(AdvisorPlugin):
 PLUGINS: List[AdvisorPlugin] = [VastuAdvisor(), EcoAdvisor()]
 
 # ---------------------
-# 🧐 LLM Factory
-# ---------------------
-def get_llm():
-    key = os.getenv("GROQ_API_KEY")
-    if key:
-        logger.info("✅ Using Groq LLM: llama3-70b-8192")
-        return ChatGroq(api_key=key, model_name="llama3-70b-8192", temperature=0.6)
-    logger.warning("⚠️ Falling back to OpenAI GPT-4")
-    return ChatOpenAI(model="gpt-4", temperature=0.6)
-
-# ---------------------
 # 🧐 LLM Prompt & Chain
 # ---------------------
 _PROMPT = PromptTemplate(
@@ -122,6 +111,20 @@ Be concise and user‎-friendly.
 """
 )
 
+# ---------------------
+# 🧐 LLM Factory
+# ---------------------
+def get_llm():
+    key = os.getenv("GROQ_API_KEY")
+    if key and key.startswith("gsk_"):  # You may adjust prefix based on Groq key format
+        logger.info("✅ Using Groq LLM: llama3-70b-8192")
+        return ChatGroq(api_key=key, model_name="llama3-70b-8192", temperature=0.6)
+    logger.warning("⚠️ GROQ_API_KEY not set or invalid. Using OpenAI GPT-4 instead.")
+    return ChatOpenAI(model="gpt-4", temperature=0.6)
+
+# ---------------------
+# 🧠 LLM Caller with Fallback
+# ---------------------
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, max=10),
@@ -129,13 +132,23 @@ Be concise and user‎-friendly.
 )
 async def call_llm(chain: LLMChain, vars: dict) -> str:
     try:
-        return await chain.arun(vars)
+        response = await chain.ainvoke(vars)
+        return response
     except Exception as e:
-        logger.warning("⚠️ Groq failed. Switching to OpenAI GPT-4. Reason: {}", str(e))
+        logger.warning("⚠️ Groq failed. Switching to GPT-4. Reason: {}", str(e))
         FALLBACK_USED.inc()
-        fallback_llm = ChatOpenAI(model="gpt-4", temperature=0.6)
-        fallback_chain = LLMChain(llm=fallback_llm, prompt=_PROMPT)
-        return await fallback_chain.arun(vars)
+
+        try:
+            fallback_llm = ChatOpenAI(model="gpt-4", temperature=0.6)
+            fallback_chain = LLMChain(llm=fallback_llm, prompt=_PROMPT)
+            response = await fallback_chain.ainvoke(vars)
+            return response
+        except Exception as fallback_error:
+            logger.error("❌ Fallback GPT-4 failed: {}", str(fallback_error))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Both Groq and GPT-4 failed."
+            )
 
 # ---------------------
 # 🚀 Endpoint
@@ -180,7 +193,7 @@ async def smart_layout(
 
             try:
                 response_text = await call_llm(chain, variables)
-                logger.info("✅ LLM raw response: {}", response_text)
+                logger.info("✅ LLM raw response: {}", repr(response_text))
             except Exception as e:
                 logger.error("❌ LLM call failed: {}", str(e))
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM service unavailable")
