@@ -26,12 +26,15 @@ def get_llm():
             logger.warning(f"⚠️ Groq init failed: {e} — falling back to OpenAI")
 
     if openai_key:
-        logger.info("🔁 Using OpenAI GPT-4 fallback")
-        _llm = ChatOpenAI(
-            api_key=openai_key,
-            model="gpt-4",
-            temperature=0.7
-        )
-        return _llm
+        try:
+            logger.info("🔁 Using OpenAI GPT-4 fallback")
+            _llm = ChatOpenAI(
+                openai_api_key=openai_key,  # ✅ Correct param
+                model="gpt-4",
+                temperature=0.7
+            )
+            return _llm
+        except Exception as e:
+            logger.error(f"❌ Fallback GPT-4 failed: {e}")
 
     raise RuntimeError("❌ No valid API key found for Groq or OpenAI")
